@@ -1,6 +1,6 @@
 (() => {
 const $ = id => document.getElementById(id);
-const state = { items: [], tab: 'live', group: 'Todos', q: '', limit: 120, current: null, list: [], hls: null,
+const state = { items: [], tab: 'live', group: 'Todos', q: '', limit: 120, current: null, list: [], hls: null, ts: null, timer: 0,
   favs: new Set(JSON.parse(localStorage.getItem('ntv_favs') || '[]')) };
 
 // ---------- Parser M3U ----------
@@ -104,48 +104,70 @@ function render() {
 
 // ---------- Player ----------
 function destroyPlayers() {
+  clearTimeout(state.timer);
   if (state.hls) { state.hls.destroy(); state.hls = null; }
   if (state.ts) { try { state.ts.destroy(); } catch (e) {} state.ts = null; }
 }
 function play(item) {
+  const v = $('video');
   state.current = item;
   $('playerWrap').hidden = false; $('err').hidden = true;
   $('nowTitle').textContent = item.name;
-  const v = $('video'); destroyPlayers();
-  let url = item.url;
-  // Xtream: /live/user/pass/123.ts -> .m3u8 (HLS toca melhor no navegador)
-  if (item.type === 'live' && /\/live\/[^/]+\/[^/]+\/[^/]+\.ts(\?|$)/i.test(url)) url = url.replace(/\.ts(\?|$)/i, '.m3u8$1');
-  const direct = () => { v.src = url; v.play().catch(() => {}); };
-  const viaTs = () => {
-    destroyPlayers();
-    if (window.mpegts && mpegts.isSupported()) {
-      const p = state.ts = mpegts.createPlayer({ type: 'mpegts', isLive: item.type === 'live', url: item.url });
-      p.attachMediaElement(v); p.load();
-      p.on(mpegts.Events.ERROR, () => showErr());
-      const r = p.play(); if (r && r.catch) r.catch(() => {});
-    } else showErr();
-  };
-  const viaHls = () => {
-    if (!(window.Hls && Hls.isSupported())) return direct();
-    const h = state.hls = new Hls({ maxBufferLength: 30 });
-    let retries = 0;
-    h.loadSource(url); h.attachMedia(v);
-    h.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
-    h.on(Hls.Events.ERROR, (_, d) => { if (!d.fatal) return;
-      if (d.type === Hls.ErrorTypes.MEDIA_ERROR && retries++ < 2) return h.recoverMediaError();
-      if (d.type === Hls.ErrorTypes.NETWORK_ERROR && retries++ < 1) return h.startLoad();
-      item.type === 'live' ? viaTs() : showErr(); });
-  };
-  const isM3u8 = /\.m3u8|output=m3u8|type=m3u8/i.test(url);
-  if (isM3u8) viaHls();
-  else if (item.type === 'live') { /\.ts(\?|$)/i.test(url) || !/\.(mp4|mkv|avi)(\?|$)/i.test(url) ? viaHls() : direct(); }
-  else direct();
   document.querySelectorAll('.card').forEach(c => c.classList.remove('playing'));
   window.scrollTo({ top: 0, behavior: 'smooth' });
+  v.pause(); v.removeAttribute('src'); v.load(); destroyPlayers();
+
+  // monta a lista de tentativas, na ordem
+  const tries = [], seen = new Set();
+  const add = (kind, url) => { const k = kind + '|' + url; if (url && !seen.has(k)) { seen.add(k); tries.push({ kind, url }); } };
+  const orig = item.url;
+  if (item.type === 'live') {
+    add('hls', orig);
+    if (/\.ts(\?|$)/i.test(orig)) add('hls', orig.replace(/\.ts(\?|$)/i, '.m3u8$1'));
+    add('ts', /\.ts(\?|$)/i.test(orig) ? orig : orig.replace(/(\?|$)/, '.ts$1'));
+    add('ts', orig);
+  } else { add('hls', orig); add('dir', orig); }
+
+  let i = 0;
+  const onFail = () => {
+    if (!tries.length) return showErr();
+    tries.splice(i, 1); i = 0;
+    if (!tries.length) return showErr();
+    run();
+  };
+  function run() {
+    destroyPlayers();
+    const t = tries[i]; if (!t) return showErr();
+    $('err').hidden = true;
+    state.timer = setTimeout(() => { if (v.readyState < 2) onFail(); }, 14000);
+    v.addEventListener('playing', () => clearTimeout(state.timer), { once: true });
+    if (t.kind === 'ts') {
+      if (window.mpegts && mpegts.isSupported()) {
+        const p = state.ts = mpegts.createPlayer({ type: 'mpegts', isLive: true, url: t.url });
+        p.attachMediaElement(v); p.load();
+        p.on(mpegts.Events.ERROR, onFail);
+        const r = p.play(); if (r && r.catch) r.catch(() => {});
+      } else onFail();
+    } else if (t.kind === 'hls') {
+      if (!(window.Hls && Hls.isSupported())) { tries[i] = { kind: 'dir', url: t.url }; return run(); }
+      const h = state.hls = new Hls({ manifestLoadingTimeOut: 15000, fragLoadingTimeOut: 25000, maxBufferLength: 30, manifestLoadingMaxRetry: 2 });
+      let rec = 0;
+      h.loadSource(t.url); h.attachMedia(v);
+      h.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
+      h.on(Hls.Events.ERROR, (_, d) => { if (!d.fatal) return;
+        if (d.type === Hls.ErrorTypes.MEDIA_ERROR && rec++ < 2) return h.recoverMediaError();
+        onFail(); });
+    } else {
+      v.src = t.url; const r = v.play(); if (r && r.catch) r.catch(() => {});
+    }
+    // se depois de um tempo o video nao produziu imagem, tenta o proximo formato
+    setTimeout(() => { if (!v.videoWidth && !v.ended) onFail(); }, 9000);
+  }
+  run();
 }
 function showErr() {
   const e = $('err'); e.hidden = false;
-  e.textContent = 'Não foi possível reproduzir. O stream pode estar offline, ser incompatível com o navegador ou bloquear acesso (CORS/HTTP em página HTTPS).';
+  e.textContent = 'Não foi possível reproduzir este item. Ele pode estar offline, usar um formato que o celular não toca, ou o servidor pode estar bloqueando o acesso.';
 }
 $('video').addEventListener('error', showErr);
 
@@ -192,7 +214,7 @@ $('btnOk').onclick = load;
 $('btnPrev').onclick = () => step(-1); $('btnNext').onclick = () => step(1);
 $('btnFs').onclick = () => $('video').requestFullscreen?.();
 $('btnPip').onclick = () => $('video').requestPictureInPicture?.().catch(() => {});
-$('btnClose').onclick = () => { $('video').pause(); $('video').removeAttribute('src'); destroyPlayers(); $('playerWrap').hidden = true; };
+$('btnClose').onclick = () => { clearTimeout(state.timer); $('video').pause(); $('video').removeAttribute('src'); destroyPlayers(); $('playerWrap').hidden = true; };
 document.addEventListener('keydown', e => {
   if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
   const v = $('video');
