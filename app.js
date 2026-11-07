@@ -35,6 +35,14 @@ function parseEpisode(name) {
   return { show: name, season: 1, ep: 0 };
 }
 
+// ---------- Armazenamento (IndexedDB: aguenta playlists grandes) ----------
+const idb = {
+  open: () => new Promise((res, rej) => { const r = indexedDB.open('neontv', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }),
+  async get(k) { const db = await this.open(); return new Promise(res => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(null); }); },
+  async set(k, v) { const db = await this.open(); return new Promise(res => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(true); t.onerror = () => res(false); }); }
+};
+
 // ---------- Carregamento ----------
 async function load() {
   const st = $('status'); st.textContent = 'Carregando...';
@@ -49,7 +57,7 @@ async function load() {
     if (!text.includes('#EXTINF')) throw new Error('Playlist inválida ou vazia');
     state.items = parseM3U(text);
     localStorage.setItem('ntv_url', $('url').value.trim());
-    try { localStorage.setItem('ntv_pl', text.length < 4e6 ? text : ''); } catch (e) {}
+    await idb.set('pl', text);
     $('dlg').close(); state.group = 'Todos'; render();
   } catch (e) { st.textContent = 'Erro: ' + e.message + ' (se for CORS, envie o arquivo local)'; }
 }
@@ -95,22 +103,43 @@ function render() {
 }
 
 // ---------- Player ----------
+function destroyPlayers() {
+  if (state.hls) { state.hls.destroy(); state.hls = null; }
+  if (state.ts) { try { state.ts.destroy(); } catch (e) {} state.ts = null; }
+}
 function play(item) {
   state.current = item;
   $('playerWrap').hidden = false; $('err').hidden = true;
   $('nowTitle').textContent = item.name;
-  const v = $('video'), url = item.url;
-  if (state.hls) { state.hls.destroy(); state.hls = null; }
-  const isHls = /\.m3u8|\/live\/|output=m3u8|type=m3u8/i.test(url) || (item.type === 'live' && !/\.(mp4|mkv|ts)(\?|$)/i.test(url));
-  if (isHls && window.Hls && Hls.isSupported()) {
+  const v = $('video'); destroyPlayers();
+  let url = item.url;
+  // Xtream: /live/user/pass/123.ts -> .m3u8 (HLS toca melhor no navegador)
+  if (item.type === 'live' && /\/live\/[^/]+\/[^/]+\/[^/]+\.ts(\?|$)/i.test(url)) url = url.replace(/\.ts(\?|$)/i, '.m3u8$1');
+  const direct = () => { v.src = url; v.play().catch(() => {}); };
+  const viaTs = () => {
+    destroyPlayers();
+    if (window.mpegts && mpegts.isSupported()) {
+      const p = state.ts = mpegts.createPlayer({ type: 'mpegts', isLive: item.type === 'live', url: item.url });
+      p.attachMediaElement(v); p.load();
+      p.on(mpegts.Events.ERROR, () => showErr());
+      const r = p.play(); if (r && r.catch) r.catch(() => {});
+    } else showErr();
+  };
+  const viaHls = () => {
+    if (!(window.Hls && Hls.isSupported())) return direct();
     const h = state.hls = new Hls({ maxBufferLength: 30 });
+    let retries = 0;
     h.loadSource(url); h.attachMedia(v);
-    h.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) {
-      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) h.startLoad();
-      else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) h.recoverMediaError();
-      else showErr(); } });
-  } else v.src = url;
-  v.play().catch(() => {});
+    h.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
+    h.on(Hls.Events.ERROR, (_, d) => { if (!d.fatal) return;
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR && retries++ < 2) return h.recoverMediaError();
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR && retries++ < 1) return h.startLoad();
+      item.type === 'live' ? viaTs() : showErr(); });
+  };
+  const isM3u8 = /\.m3u8|output=m3u8|type=m3u8/i.test(url);
+  if (isM3u8) viaHls();
+  else if (item.type === 'live') { /\.ts(\?|$)/i.test(url) || !/\.(mp4|mkv|avi)(\?|$)/i.test(url) ? viaHls() : direct(); }
+  else direct();
   document.querySelectorAll('.card').forEach(c => c.classList.remove('playing'));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -163,7 +192,7 @@ $('btnOk').onclick = load;
 $('btnPrev').onclick = () => step(-1); $('btnNext').onclick = () => step(1);
 $('btnFs').onclick = () => $('video').requestFullscreen?.();
 $('btnPip').onclick = () => $('video').requestPictureInPicture?.().catch(() => {});
-$('btnClose').onclick = () => { $('video').pause(); $('video').removeAttribute('src'); if (state.hls) state.hls.destroy(); $('playerWrap').hidden = true; };
+$('btnClose').onclick = () => { $('video').pause(); $('video').removeAttribute('src'); destroyPlayers(); $('playerWrap').hidden = true; };
 document.addEventListener('keydown', e => {
   if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
   const v = $('video');
@@ -175,8 +204,13 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'n') step(1); else if (e.key === 'p') step(-1);
 });
 
-// restaura última playlist
-const saved = localStorage.getItem('ntv_pl');
-if (saved && saved.includes('#EXTINF')) { state.items = parseM3U(saved); }
-render();
+// restaura a última playlist (cache) e atualiza em segundo plano pela URL salva
+(async () => {
+  render();
+  try { const saved = await idb.get('pl');
+    if (saved && saved.includes('#EXTINF')) { state.items = parseM3U(saved); render(); } } catch (e) {}
+  const u = localStorage.getItem('ntv_url');
+  if (u) { try { const r = await fetch(u); if (r.ok) { const t = await r.text();
+    if (t.includes('#EXTINF')) { state.items = parseM3U(t); await idb.set('pl', t); render(); } } } catch (e) {} }
+})();
 })();
