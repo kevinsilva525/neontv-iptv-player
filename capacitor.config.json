@@ -1,6 +1,6 @@
 {
-  "appId": "com.neontv.player",
-  "appName": "NEONTV",
+  "appId": "com.kplaytv.player",
+  "appName": "KPLAYTV",
   "webDir": "www",
   "server": {
     "androidScheme": "http",
