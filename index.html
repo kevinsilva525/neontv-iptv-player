@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEONTV · Player IPTV</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+</head>
+<body>
+<div class="bg-grid"></div>
+<header class="top">
+  <div class="logo">NEON<span>TV</span></div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="live" class="active">📡 Canais <b id="cLive">0</b></button>
+    <button data-tab="movie">🎬 Filmes <b id="cMovie">0</b></button>
+    <button data-tab="series">📺 Séries <b id="cSeries">0</b></button>
+    <button data-tab="fav">★ Favoritos <b id="cFav">0</b></button>
+  </nav>
+  <input id="search" type="search" placeholder="Buscar..." autocomplete="off">
+  <button id="btnLoad" class="btn">⚙ Playlist</button>
+</header>
+
+<main class="layout">
+  <aside class="side" id="side"></aside>
+  <section class="content">
+    <div class="player-wrap" id="playerWrap" hidden>
+      <video id="video" controls autoplay playsinline></video>
+      <div class="now"><span id="nowTitle"></span>
+        <div>
+          <button class="btn sm" id="btnPrev">⏮</button>
+          <button class="btn sm" id="btnNext">⏭</button>
+          <button class="btn sm" id="btnPip">PiP</button>
+          <button class="btn sm" id="btnFs">⛶</button>
+          <button class="btn sm" id="btnClose">✕</button>
+        </div>
+      </div>
+      <div class="err" id="err" hidden></div>
+    </div>
+    <div id="episodes" class="episodes" hidden></div>
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="empty">Nenhuma playlist carregada.<br>Clique em <b>⚙ Playlist</b> para começar.</div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <h2>Carregar playlist</h2>
+  <label>URL M3U / M3U8</label>
+  <input id="url" placeholder="http://servidor/get.php?username=..&password=..&type=m3u_plus">
+  <label>ou arquivo local</label>
+  <input id="file" type="file" accept=".m3u,.m3u8,.txt">
+  <label>ou cole o conteúdo</label>
+  <textarea id="paste" rows="4" placeholder="#EXTM3U..."></textarea>
+  <p class="hint">Use apenas listas às quais você tem direito de acesso. Se a URL bloquear (CORS), baixe o arquivo e envie localmente.</p>
+  <div class="row">
+    <button class="btn" id="btnCancel">Cancelar</button>
+    <button class="btn pri" id="btnOk">Carregar</button>
+  </div>
+  <div id="status" class="hint"></div>
+</dialog>
+<script src="app.js"></script>
+</body>
+</html>
