@@ -9,9 +9,8 @@
 <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1/dist/mpegts.js"></script>
 </head>
 <body>
-<div class="bg-grid"></div>
 <header class="top">
-  <div class="logo">KPLAY<span>TV</span></div>
+  <div class="logo">KPLAY<i>TV</i></div>
   <nav class="tabs" id="tabs">
     <button data-tab="live" class="active">📡 Canais <b id="cLive">0</b></button>
     <button data-tab="movie">🎬 Filmes <b id="cMovie">0</b></button>
@@ -25,8 +24,11 @@
 <main class="layout">
   <aside class="side" id="side"></aside>
   <section class="content">
+    <div id="menu" class="menu-blocks"></div>
+
     <div class="player-wrap" id="playerWrap" hidden>
       <video id="video" controls autoplay playsinline></video>
+      <div class="spin" id="spin" hidden><i></i></div>
       <div class="now"><span id="nowTitle"></span>
         <div>
           <button class="btn sm" id="btnPrev">⏮</button>
@@ -38,27 +40,44 @@
       </div>
       <div class="err" id="err" hidden></div>
     </div>
+
     <div id="episodes" class="episodes" hidden></div>
     <div class="grid" id="grid"></div>
-    <div class="empty" id="empty">Nenhuma playlist carregada.<br>Clique em <b>⚙ Playlist</b> para começar.</div>
+    <div class="empty" id="empty"></div>
   </section>
 </main>
 
 <dialog id="dlg">
-  <h2>Carregar playlist</h2>
-  <label>URL M3U / M3U8</label>
-  <input id="url" placeholder="http://servidor/get.php?username=..&password=..&type=m3u_plus">
-  <label>ou arquivo local</label>
-  <input id="file" type="file" accept=".m3u,.m3u8,.txt">
-  <label>ou cole o conteúdo</label>
-  <textarea id="paste" rows="4" placeholder="#EXTM3U..."></textarea>
-  <p class="hint">Use apenas listas às quais você tem direito de acesso. Se a URL bloquear (CORS), baixe o arquivo e envie localmente.</p>
+  <h2 id="dlgTitle">Carregar playlist</h2>
+  <p class="sub" id="dlgSub"></p>
+
+  <div id="formUrl">
+    <label>URL M3U / M3U8</label>
+    <input id="url" placeholder="http://servidor/get.php?username=..&password=..&type=m3u_plus">
+    <label>ou arquivo local</label>
+    <input id="file" type="file" accept=".m3u,.m3u8,.txt">
+    <label>ou cole o conteúdo</label>
+    <textarea id="paste" rows="3" placeholder="#EXTM3U..."></textarea>
+  </div>
+
+  <div id="formDns" hidden>
+    <label>DNS do servidor</label>
+    <input id="dns" value="KEVIN4MVENDAS0805.COM.BR" autocapitalize="off" spellcheck="false">
+    <label>Usuário</label>
+    <input id="user" autocapitalize="off" spellcheck="false">
+    <label>Senha</label>
+    <input id="pass" type="password">
+    <label class="check"><input id="ssl" type="checkbox"> Usar HTTPS</label>
+  </div>
+
+  <p class="hint">Um DNS compatível já responde com a lista e as logos automaticamente. Se der erro, use a <b>URL M3U</b> com o endereço completo. Use apenas listas às quais você tem direito de acesso.</p>
   <div class="row">
     <button class="btn" id="btnCancel">Cancelar</button>
     <button class="btn pri" id="btnOk">Carregar</button>
   </div>
   <div id="status" class="hint"></div>
 </dialog>
+
 <script src="app.js"></script>
 </body>
 </html>

@@ -11,8 +11,8 @@ function parseM3U(text) {
     if (!line) continue;
     if (line.startsWith('#EXTINF')) {
       const attr = k => (line.match(new RegExp(k + '="([^"]*)"', 'i')) || [])[1] || '';
-      meta = { name: line.slice(line.lastIndexOf(',') + 1).trim() || attr('tvg-name'),
-        logo: attr('tvg-logo'), group: attr('group-title') || 'Sem categoria', id: attr('tvg-id') };
+      const name = line.slice(line.lastIndexOf(',') + 1).trim() || attr('tvg-name');
+      meta = { name, logo: attr('tvg-logo'), group: attr('group-title') || 'Sem categoria', id: attr('tvg-id') };
     } else if (!line.startsWith('#') && meta) {
       meta.url = line; meta.type = classify(meta);
       if (meta.type === 'series') Object.assign(meta, parseEpisode(meta.name));
@@ -35,7 +35,7 @@ function parseEpisode(name) {
   return { show: name, season: 1, ep: 0 };
 }
 
-// ---------- Armazenamento (IndexedDB: aguenta playlists grandes) ----------
+// ---------- Armazenamento ----------
 const idb = {
   open: () => new Promise((res, rej) => { const r = indexedDB.open('neontv', 1);
     r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }),
@@ -43,49 +43,100 @@ const idb = {
   async set(k, v) { const db = await this.open(); return new Promise(res => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(true); t.onerror = () => res(false); }); }
 };
 
-// ---------- Carregamento ----------
+// ---------- Login por DNS (Xtream) ----------
+function withCreds(url, u, p) {
+  if (url.includes('{u}')) return url.replace(/\{u\}/g, encodeURIComponent(u)).replace(/\{p\}/g, encodeURIComponent(p));
+  return url;
+}
+async function dnsToPlaylist(dns, u, p, ssl, log) {
+  let host = dns.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const base = (ssl ? 'https://' : 'http://') + host;
+  log('Ligando em ' + host + ' ...');
+  let r = await fetch(base + '/player_api.php?username=' + encodeURIComponent(u) + '&password=' + encodeURIComponent(p));
+  if (!r.ok && !ssl) r = await fetch(('https://' + host) + '/player_api.php?username=' + encodeURIComponent(u) + '&password=' + encodeURIComponent(p));
+  if (!r.ok) throw new Error('o servidor respondeu ' + r.status);
+  const txt = await r.text();
+  let j = null; try { j = JSON.parse(txt); } catch (e) { throw new Error('a resposta não é de um servidor compatível'); }
+  const info = (j && j.user_info) || {};
+  if (info.auth === 0 || info.auth === '0') throw new Error('usuário ou senha incorretos');
+  if (info.status && String(info.status).toLowerCase() !== 'active') throw new Error('a conta está ' + info.status);
+  log('Conta OK. Buscando a lista ...');
+  const L = await fetch(base + '/get.php?username=' + encodeURIComponent(u) + '&password=' + encodeURIComponent(p) + '&type=m3u_plus&output=ts');
+  if (!L.ok) throw new Error('não consegui baixar a lista (' + L.status + ')');
+  let text = await L.text();
+  if (!text.includes('#EXTINF')) throw new Error('o servidor não devolveu uma lista M3U');
+  return { text, base, host };
+}
+
+// ---------- Carregar ----------
+async function loadUrl(text, url) {
+  state.items = parseM3U(text);
+  if (!state.items.length) throw new Error('nenhum canal encontrado na lista');
+  await idb.set('pl', text);
+  localStorage.setItem('ntv_url', url || '');
+}
 async function load() {
   const st = $('status'); st.textContent = 'Carregando...';
+  const dnsMode = !$('formDns').hidden;
   try {
-    let text = $('paste').value.trim();
-    const f = $('file').files[0];
-    if (f) text = await f.text();
-    else if (!text && $('url').value.trim()) {
-      const r = await fetch($('url').value.trim()); if (!r.ok) throw new Error('HTTP ' + r.status);
-      text = await r.text();
+    if (dnsMode) {
+      const dns = $('dns').value.trim(), u = $('user').value.trim(), p = $('pass').value;
+      if (!dns || !u || !p) throw new Error('preencha DNS, usuário e senha');
+      localStorage.setItem('ntv_dns', dns); localStorage.setItem('ntv_user', u); localStorage.setItem('ntv_pass', p);
+      localStorage.setItem('ntv_ssl', $('ssl').checked ? '1' : '');
+      const res = await dnsToPlaylist(dns, u, p, $('ssl').checked, m => { st.textContent = m; });
+      await loadUrl(res.text, '');
+      localStorage.setItem('ntv_dnsurl', dns);
+    } else {
+      let text = $('paste').value.trim();
+      const f = $('file').files[0];
+      const url = $('url').value.trim();
+      if (f) text = await f.text();
+      else if (!text && url) {
+        const r = await fetch(withCreds(url, $('user').value, $('pass').value));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        text = await r.text();
+      }
+      if (!text.includes('#EXTINF')) throw new Error('playlist inválida ou vazia');
+      await loadUrl(text, url);
     }
-    if (!text.includes('#EXTINF')) throw new Error('Playlist inválida ou vazia');
-    state.items = parseM3U(text);
-    localStorage.setItem('ntv_url', $('url').value.trim());
-    await idb.set('pl', text);
-    $('dlg').close(); state.group = 'Todos'; render();
-  } catch (e) { st.textContent = 'Erro: ' + e.message + ' (se for CORS, envie o arquivo local)'; }
+    $('dlg').close(); state.group = 'Todos'; state.limit = 120; render();
+  } catch (e) { st.textContent = 'Erro: ' + e.message + ' (se for bloqueio do navegador, use a URL M3U completa)'; }
+}
+async function refreshDns() {
+  const dns = localStorage.getItem('ntv_dns'), u = localStorage.getItem('ntv_user'), p = localStorage.getItem('ntv_pass');
+  if (!dns || !u || !p) return;
+  try { const r = await dnsToPlaylist(dns, u, p, !!localStorage.getItem('ntv_ssl'), () => {});
+    if (r.text.includes('#EXTINF')) { await loadUrl(r.text, ''); render(); } } catch (e) {}
 }
 
 // ---------- Render ----------
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-function visibleItems() {
-  const q = state.q.toLowerCase();
-  let arr = state.tab === 'fav' ? state.items.filter(i => state.favs.has(i.key)) : state.items.filter(i => i.type === state.tab);
-  if (state.group !== 'Todos') arr = arr.filter(i => i.group === state.group);
-  if (q) arr = arr.filter(i => i.name.toLowerCase().includes(q) || (i.show || '').toLowerCase().includes(q));
-  return arr;
+const byType = t => state.items.filter(i => i.type === t);
+const showCount = () => new Set(state.items.filter(i => i.type === 'series').map(i => i.show)).size;
+function menu() {
+  const has = state.items.length > 0;
+  $('menu').innerHTML = has ? '' : `<div class="logo" style="text-align:center;font-size:40px">KPLAY<i>TV</i></div>
+    <button class="block big" data-m="dns"><i>▶</i>Entrar com DNS</button>
+    <button class="block" data-m="url"><i>⚙</i>URL M3U</button>
+    <button class="block plain" data-m="last"><i>↻</i>Recarregar última lista</button>`;
+  $('menu').hidden = has;
+  $('empty').innerHTML = has ? '' : '<p>Informe o DNS, o usuário e a senha do seu servidor para começar.</p>';
+  $('empty').hidden = has;
 }
 function render() {
   const has = state.items.length > 0;
-  $('empty').hidden = has;
-  const cnt = t => state.items.filter(i => i.type === t).length;
-  $('cLive').textContent = cnt('live'); $('cMovie').textContent = cnt('movie');
-  $('cSeries').textContent = new Set(state.items.filter(i => i.type === 'series').map(i => i.show)).size;
-  $('cFav').textContent = state.favs.size;
+  menu();
+  $('tabs').hidden = !has; $('search').hidden = !has;
+  $('cLive').textContent = byType('live').length; $('cMovie').textContent = byType('movie').length;
+  $('cSeries').textContent = showCount(); $('cFav').textContent = state.favs.size;
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.tab));
-  // categorias
-  const base = state.tab === 'fav' ? state.items.filter(i => state.favs.has(i.key)) : state.items.filter(i => i.type === state.tab);
+  const base = state.tab === 'fav' ? state.items.filter(i => state.favs.has(i.key)) : byType(state.tab);
   const groups = ['Todos', ...[...new Set(base.map(i => i.group))].sort((a, b) => a.localeCompare(b))];
   $('side').innerHTML = groups.map(g => `<button class="${g === state.group ? 'active' : ''}" data-g="${esc(g)}" title="${esc(g)}">${esc(g)}</button>`).join('');
-  // grade
+  $('side').hidden = !has;
   let arr = visibleItems();
-  if (state.tab === 'series') { // agrupa por série
+  if (state.tab === 'series') {
     const map = new Map();
     arr.forEach(i => { if (!map.has(i.show)) map.set(i.show, { ...i, name: i.show, count: 0, series: true }); map.get(i.show).count++; });
     arr = [...map.values()];
@@ -101,13 +152,21 @@ function render() {
     (arr.length > shown.length ? `<div class="more"><button class="btn" id="more">Mostrar mais (${arr.length - shown.length})</button></div>` : '');
   if (has && !arr.length) g.innerHTML = '<div class="more">Nada encontrado.</div>';
 }
+function visibleItems() {
+  const q = state.q.toLowerCase();
+  let arr = state.tab === 'fav' ? state.items.filter(i => state.favs.has(i.key)) : byType(state.tab);
+  if (state.group !== 'Todos') arr = arr.filter(i => i.group === state.group);
+  if (q) arr = arr.filter(i => i.name.toLowerCase().includes(q) || (i.show || '').toLowerCase().includes(q));
+  return arr;
+}
 
-// ---------- Player ----------
+// ---------- Player (rapido: 1 tentativa principal, depois alternativas) ----------
 function destroyPlayers() {
   clearTimeout(state.timer);
   if (state.hls) { state.hls.destroy(); state.hls = null; }
   if (state.ts) { try { state.ts.destroy(); } catch (e) {} state.ts = null; }
 }
+const spin = on => { $('spin').hidden = !on; };
 function play(item) {
   const v = $('video');
   state.current = item;
@@ -115,61 +174,57 @@ function play(item) {
   $('nowTitle').textContent = item.name;
   document.querySelectorAll('.card').forEach(c => c.classList.remove('playing'));
   window.scrollTo({ top: 0, behavior: 'smooth' });
-  v.pause(); v.removeAttribute('src'); v.load(); destroyPlayers();
+  v.pause(); v.removeAttribute('src'); v.load(); destroyPlayers(); spin(true);
 
-  // monta a lista de tentativas, na ordem
   const tries = [], seen = new Set();
   const add = (kind, url) => { const k = kind + '|' + url; if (url && !seen.has(k)) { seen.add(k); tries.push({ kind, url }); } };
   const orig = item.url;
   if (item.type === 'live') {
-    add('hls', orig);
-    if (/\.ts(\?|$)/i.test(orig)) add('hls', orig.replace(/\.ts(\?|$)/i, '.m3u8$1'));
-    add('ts', /\.ts(\?|$)/i.test(orig) ? orig : orig.replace(/(\?|$)/, '.ts$1'));
+    add('hls', /\.[a-z]+(\?|$)/i.test(orig) ? orig.replace(/\.[a-z]+(\?|$)/i, '.m3u8$1') : orig);
     add('ts', orig);
+    add('ts', /\.[a-z]+(\?|$)/i.test(orig) ? orig.replace(/\.[a-z]+(\?|$)/i, '.ts$1') : orig + '.ts');
   } else { add('hls', orig); add('dir', orig); }
 
   let i = 0;
-  const onFail = () => {
-    if (!tries.length) return showErr();
-    tries.splice(i, 1); i = 0;
-    if (!tries.length) return showErr();
-    run();
-  };
+  const finish = () => { spin(false); };
+  const onFail = () => { if (!tries.length) { finish(); return showErr(); } tries.splice(i, 1); i = 0; if (!tries.length) { finish(); return showErr(); } run(); };
   function run() {
     destroyPlayers();
-    const t = tries[i]; if (!t) return showErr();
-    $('err').hidden = true;
-    state.timer = setTimeout(() => { if (v.readyState < 2) onFail(); }, 14000);
-    v.addEventListener('playing', () => clearTimeout(state.timer), { once: true });
+    const t = tries[i]; if (!t) { finish(); return showErr(); }
+    $('err').hidden = true; spin(true);
+    state.timer = setTimeout(() => { if (v.readyState < 2) onFail(); }, 7000);
     if (t.kind === 'ts') {
       if (window.mpegts && mpegts.isSupported()) {
         const p = state.ts = mpegts.createPlayer({ type: 'mpegts', isLive: true, url: t.url });
         p.attachMediaElement(v); p.load();
         p.on(mpegts.Events.ERROR, onFail);
+        v.addEventListener('playing', () => { clearTimeout(state.timer); finish(); }, { once: true });
         const r = p.play(); if (r && r.catch) r.catch(() => {});
       } else onFail();
     } else if (t.kind === 'hls') {
       if (!(window.Hls && Hls.isSupported())) { tries[i] = { kind: 'dir', url: t.url }; return run(); }
-      const h = state.hls = new Hls({ manifestLoadingTimeOut: 15000, fragLoadingTimeOut: 25000, maxBufferLength: 30, manifestLoadingMaxRetry: 2 });
+      const h = state.hls = new Hls({ lowLatencyMode: true, maxBufferLength: 12, maxMaxBufferLength: 24, liveSyncDurationCount: 3, manifestLoadingTimeOut: 6000, manifestLoadingMaxRetry: 1, fragLoadingTimeOut: 12000 });
       let rec = 0;
       h.loadSource(t.url); h.attachMedia(v);
-      h.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {}));
+      v.addEventListener('playing', () => { clearTimeout(state.timer); finish(); }, { once: true });
+      h.on(Hls.Events.MANIFEST_PARSED, () => { v.play().catch(() => {}); });
       h.on(Hls.Events.ERROR, (_, d) => { if (!d.fatal) return;
-        if (d.type === Hls.ErrorTypes.MEDIA_ERROR && rec++ < 2) return h.recoverMediaError();
+        if (d.type === Hls.ErrorTypes.MEDIA_ERROR && rec++ < 1) return h.recoverMediaError();
         onFail(); });
     } else {
       v.src = t.url; const r = v.play(); if (r && r.catch) r.catch(() => {});
+      v.addEventListener('playing', () => { clearTimeout(state.timer); finish(); }, { once: true });
+      v.addEventListener('loadeddata', () => { clearTimeout(state.timer); finish(); }, { once: true });
     }
-    // se depois de um tempo o video nao produziu imagem, tenta o proximo formato
-    setTimeout(() => { if (!v.videoWidth && !v.ended) onFail(); }, 9000);
+    setTimeout(() => { if (!v.videoWidth && !v.ended) onFail(); }, 7000);
   }
   run();
 }
 function showErr() {
   const e = $('err'); e.hidden = false;
-  e.textContent = 'Não foi possível reproduzir este item. Ele pode estar offline, usar um formato que o celular não toca, ou o servidor pode estar bloqueando o acesso.';
+  e.textContent = 'Não consegui abrir este canal agora. Tente outro, ou toque de novo para o app tentar de novo.';
 }
-$('video').addEventListener('error', showErr);
+$('video').addEventListener('error', () => { spin(false); });
 
 function openSeries(show) {
   const eps = state.items.filter(i => i.type === 'series' && i.show === show).sort((a, b) => a.season - b.season || a.ep - b.ep);
@@ -179,12 +234,10 @@ function openSeries(show) {
     box.innerHTML = `<h3>${esc(show)}</h3><div class="seasons">${seasons.map(x => `<button class="btn sm ${x === s ? 'act' : ''}" data-s="${x}">Temporada ${x}</button>`).join('')}</div>
     <div class="eps">${eps.filter(e => e.season === s).map(e => `<button class="btn" data-k="${esc(e.key)}">Ep. ${e.ep || '?'} — ${esc(e.name.slice(0, 40))}</button>`).join('')}</div>`;
     box.querySelectorAll('[data-s]').forEach(b => b.onclick = () => draw(+b.dataset.s));
-    box.querySelectorAll('[data-k]').forEach(b => b.onclick = () => {
-      const e = eps.find(x => x.key === b.dataset.k); state.queue = eps; play(e); });
+    box.querySelectorAll('[data-k]').forEach(b => b.onclick = () => { const e = eps.find(x => x.key === b.dataset.k); state.queue = eps; play(e); });
   };
   draw(seasons[0]); box.scrollIntoView({ behavior: 'smooth' });
 }
-
 function step(d) {
   const q = state.queue || state.list.filter(i => !i.series);
   const i = q.findIndex(x => state.current && x.key === state.current.key);
@@ -192,6 +245,25 @@ function step(d) {
 }
 
 // ---------- Eventos ----------
+$('menu').onclick = e => {
+  const b = e.target.closest('[data-m]'); if (!b) return;
+  const m = b.dataset.m;
+  if (m === 'last') { (async () => {
+      if (!state.items.length) { const s = await idb.get('pl'); if (s && s.includes('#EXTINF')) { state.items = parseM3U(s); render(); } }
+      refreshDns(); })(); return; }
+  openDlg(m === 'dns');
+};
+function openDlg(dns) {
+  $('formDns').hidden = !dns; $('formUrl').hidden = dns;
+  $('dlgTitle').textContent = dns ? 'Entrar com DNS' : 'Carregar playlist';
+  $('dlgSub').textContent = dns ? 'Digite o DNS do seu servidor e os dados da conta.' : 'Use a URL M3U, um arquivo ou cole o texto.';
+  $('status').textContent = '';
+  if (dns) { $('dns').value = localStorage.getItem('ntv_dns') || 'KEVIN4MVENDAS0805.COM.BR';
+    $('user').value = localStorage.getItem('ntv_user') || ''; $('pass').value = localStorage.getItem('ntv_pass') || '';
+    $('ssl').checked = !!localStorage.getItem('ntv_ssl'); }
+  else $('url').value = localStorage.getItem('ntv_url') || '';
+  $('dlg').showModal();
+}
 $('tabs').onclick = e => { const b = e.target.closest('button'); if (!b) return;
   state.tab = b.dataset.tab; state.group = 'Todos'; state.limit = 120; state.queue = null; $('episodes').hidden = true; render(); };
 $('side').onclick = e => { const b = e.target.closest('button'); if (!b) return; state.group = b.dataset.g; state.limit = 120; render(); };
@@ -203,18 +275,18 @@ $('grid').onclick = e => {
     const on = state.favs.has(keys[0]); keys.forEach(k => on ? state.favs.delete(k) : state.favs.add(k));
     localStorage.setItem('ntv_favs', JSON.stringify([...state.favs])); return render(); }
   const c = e.target.closest('.card'); if (!c) return;
-  const it = state.list[+c.dataset.n];
+  const it = state.list[+c.dataset.n]; if (!it) return;
   if (it.series) openSeries(it.show);
   else { state.queue = null; $('episodes').hidden = true; play(it); c.classList.add('playing'); }
 };
 let t; $('search').oninput = e => { clearTimeout(t); t = setTimeout(() => { state.q = e.target.value; state.limit = 120; render(); }, 200); };
-$('btnLoad').onclick = () => { $('url').value = localStorage.getItem('ntv_url') || ''; $('status').textContent = ''; $('dlg').showModal(); };
+$('btnLoad').onclick = () => openDlg(true);
 $('btnCancel').onclick = () => $('dlg').close();
 $('btnOk').onclick = load;
 $('btnPrev').onclick = () => step(-1); $('btnNext').onclick = () => step(1);
 $('btnFs').onclick = () => $('video').requestFullscreen?.();
 $('btnPip').onclick = () => $('video').requestPictureInPicture?.().catch(() => {});
-$('btnClose').onclick = () => { clearTimeout(state.timer); $('video').pause(); $('video').removeAttribute('src'); destroyPlayers(); $('playerWrap').hidden = true; };
+$('btnClose').onclick = () => { clearTimeout(state.timer); $('video').pause(); $('video').removeAttribute('src'); destroyPlayers(); spin(false); $('playerWrap').hidden = true; };
 document.addEventListener('keydown', e => {
   if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
   const v = $('video');
@@ -226,13 +298,10 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'n') step(1); else if (e.key === 'p') step(-1);
 });
 
-// restaura a última playlist (cache) e atualiza em segundo plano pela URL salva
+// ---------- Inicio ----------
 (async () => {
   render();
-  try { const saved = await idb.get('pl');
-    if (saved && saved.includes('#EXTINF')) { state.items = parseM3U(saved); render(); } } catch (e) {}
-  const u = localStorage.getItem('ntv_url');
-  if (u) { try { const r = await fetch(u); if (r.ok) { const t = await r.text();
-    if (t.includes('#EXTINF')) { state.items = parseM3U(t); await idb.set('pl', t); render(); } } } catch (e) {} }
+  try { const s = await idb.get('pl'); if (s && s.includes('#EXTINF')) { state.items = parseM3U(s); render(); } } catch (e) {}
+  refreshDns();
 })();
 })();
